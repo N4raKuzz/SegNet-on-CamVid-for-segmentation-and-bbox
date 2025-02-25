@@ -80,29 +80,25 @@ def generate_annotations(images_dir, masks_dir, output_json):
 
     # Main logic: scan images, match masks, extract bounding boxes.
     all_annotations = []
-    
-    valid_exts = {".png", ".jpg", ".jpeg"}
     image_files = sorted(os.listdir(images_dir))
     
     for filename in image_files:
         name, ext = os.path.splitext(filename)
-        if ext.lower() not in valid_exts:
-            continue
-        
-        # Full path to the image
         image_path = os.path.join(images_dir, filename)
         
         # Assume mask has the same name but in the masks_dir
-        mask_filename = name + ".png"
+        mask_filename = name + "_L.png"
         mask_path = os.path.join(masks_dir, mask_filename)
         
         if not os.path.exists(mask_path):
             print(f"[WARNING] Mask file not found for {filename}. Skipping.")
             continue
         
-        # Read image and mask
+        # Read image and mask + Convert RGB
         image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(mask_path)
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
         
         if image is None or mask is None:
             print(f"[WARNING] Could not read image or mask for {filename}. Skipping.")
@@ -113,9 +109,9 @@ def generate_annotations(images_dir, masks_dir, output_json):
         # Collect bounding boxes for all classes we care about
         image_bboxes = []
         
-        for class_name, bgr_color in TARGET_CLASS_COLORS.items():
+        for class_name, rgb_color in TARGET_CLASS_COLORS.items():
             # Create a binary mask for this class by checking if each pixel matches the color
-            class_mask = cv2.inRange(mask, bgr_color, bgr_color)  # 255 where exactly matches bgr_color
+            class_mask = cv2.inRange(mask, rgb_color, rgb_color) 
             
             # Extract bounding boxes for connected components
             bboxes = get_bounding_boxes_for_class(class_mask, class_name)
