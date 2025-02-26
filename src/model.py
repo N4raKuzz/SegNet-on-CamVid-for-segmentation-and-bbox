@@ -74,9 +74,3 @@ class UNet(nn.Module):
             return self.out_conv_seg(x)
         elif self.mode == 'bbox':
             return self.out_fc_bbox(x.view(x.size(0), -1))
-
-# Example usage:
-# model = UNet(in_channels=3, num_classes=5, freeze_backbone=True, mode='segmentation', H=256, W=256, encoder_channels=[64, 128, 256, 512], decoder_channels=[512, 256, 128, 64])
-# x = torch.randn(1, 3, 256, 256)
-# output = model(x)
-# print(output.shape)

@@ -71,12 +71,8 @@ def visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
         # Print bbox coordinates to the console
         print(f"Class ID: {class_id}, BBox => (x_min={x_min}, x_max={x_max}, "
               f"y_min={y_min}, y_max={y_max})")
-
-    cv2.imshow("Visualized Image", image)
-    cv2.imshow("Visualized Mask", mask)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-    print("[INFO] Visualization complete. (Not saved, no output_dir provided.)")
+        
+    return image, mask
 
 
 # Example usage:
@@ -85,4 +81,8 @@ if __name__ == "__main__":
     mask_path  = "./data/CamVid/test/masks/0001TP_006690_L.png"
     annotation_json_path = "./data/annotations/test_annotations.json"
     
-    visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
+    image, mask = visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
+    cv2.imshow("Visualized Image", image)
+    cv2.imshow("Visualized Mask", mask)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()

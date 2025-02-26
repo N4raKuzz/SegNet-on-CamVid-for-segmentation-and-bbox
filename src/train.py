@@ -5,6 +5,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from model import UNet
 from dataloader import CamVidDataset
+from evaluate import evaluate
+from loss import WeightedIoULoss
 
 def train(model, dataloader, optimizer, criterion, device):
     model.train()
@@ -17,7 +19,7 @@ def train(model, dataloader, optimizer, criterion, device):
             masks = targets.to(device)
             outputs = model(images)
             loss = criterion(outputs, masks)
-        else:  # bbox
+        elif model.mode == 'bbox':
             bboxes = targets['bboxes'].to(device)
             outputs = model(images)
             loss = criterion(outputs, bboxes)
@@ -28,8 +30,7 @@ def train(model, dataloader, optimizer, criterion, device):
 
     return total_loss / len(dataloader)
 
-# Main script
-def main(root_dir, mode='segmentation', num_classes=5, freeze_backbone=False, H=256, W=256, epochs=10, batch_size=4, lr=0.001):
+def main(root_dir, mode, num_classes, freeze_backbone, H, W, epochs, batch_size, lr, encoder_channels, decoder_channels):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     transform = None  # Add any desired transformations here
@@ -40,18 +41,45 @@ def main(root_dir, mode='segmentation', num_classes=5, freeze_backbone=False, H=
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model = UNet(in_channels=3, num_classes=num_classes, freeze_backbone=freeze_backbone, mode=mode, H=H, W=W)
+    model = UNet(
+        in_channels=3,
+        num_classes=num_classes,
+        freeze_backbone=freeze_backbone,
+        mode=mode,
+        H=H,
+        W=W,
+        encoder_channels=encoder_channels,
+        decoder_channels=decoder_channels
+    )
     model.to(device)
 
-    criterion = nn.CrossEntropyLoss() if mode == 'segmentation' else nn.MSELoss()
+    # Use custom IoU loss with class weighting for segmentation mode;
+    # For bbox mode, retain MSELoss.
+    if mode == 'segmentation':
+        class_weights = [1.0, 1.0, 1.0, 1.0, 1.0]
+        criterion = WeightedIoULoss(class_weights=class_weights)
+    elif mode == 'bbox':
+        criterion = nn.MSELoss()
+
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(epochs):
         print(f'Epoch {epoch + 1}/{epochs}')
         train_loss = train(model, train_loader, optimizer, criterion, device)
-        val_loss = evaluate(model, val_loader, criterion, device)
-
-        print(f'Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}')
+        print(f"Train Loss: {train_loss:.4f}")
+        evaluate(model, val_loader, criterion, device)
 
 if __name__ == '__main__':
-    main(root_dir='data_root', mode='segmentation', num_classes=5, freeze_backbone=False, H=720, W=960, epochs=10, batch_size=4, lr=0.001)
+    main(
+        root_dir='data',
+        mode='segmentation',
+        num_classes=5,
+        freeze_backbone=False,
+        H=720,
+        W=960,
+        epochs=10,
+        batch_size=4,
+        lr=0.001,
+        encoder_channels=[512, 256, 128, 64],
+        decoder_channels=[64, 128, 256, 512]
+    )
