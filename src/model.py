@@ -28,7 +28,7 @@ class DeconvBlock(nn.Module):
         return self.block(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, num_classes=5, freeze_backbone=False, mode='segmentation', H=256, W=256, encoder_channels=[64, 128, 256, 512], decoder_channels=[512, 256, 128, 64]):
+    def __init__(self, in_channels=3, num_classes=5, freeze_backbone=False, mode='segmentation', H=720, W=960, encoder_channels=[512, 256, 128, 64], decoder_channels=[64, 128, 256, 512]):
         super(UNet, self).__init__()
         self.mode = mode
         self.H = H
