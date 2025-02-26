@@ -15,7 +15,7 @@ TARGET_CLASS_COLORS = {
 }
 
 class CamVidDataset(Dataset):
-    def __init__(self, root_dir, split='train', mode='segmentation'):
+    def __init__(self, root_dir, split='train', mode='segmentation', transform=None):
         """
         Directory structure:
             data/
@@ -41,9 +41,10 @@ class CamVidDataset(Dataset):
         self.root_dir = root_dir
         self.split = split
         self.mode = mode
+        self.transform = transform
 
-        self.image_dir = os.path.join(root_dir, 'camvid', split, 'images')
-        self.mask_dir = os.path.join(root_dir, 'camvid', split, 'masks')
+        self.image_dir = os.path.join(root_dir, 'CamVid', split, 'images')
+        self.mask_dir = os.path.join(root_dir, 'CamVid', split, 'masks')
         self.annotation_file = os.path.join(root_dir, 'annotations', f'{split}_annotations.json')
         
         # Load all image paths in a sorted manner
@@ -69,6 +70,9 @@ class CamVidDataset(Dataset):
         img_path = self.image_paths[idx]
         filename = os.path.basename(img_path)
         image = Image.open(img_path).convert('RGB')
+
+        if self.transform:
+            image = self.transform(image)
 
         if self.mode == 'segmentation':
             mask_path = os.path.join(

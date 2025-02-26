@@ -7,6 +7,7 @@ from model import UNet
 from dataloader import CamVidDataset
 from evaluate import evaluate
 from loss import WeightedIoULoss
+from torchvision import transforms
 
 def train(model, dataloader, optimizer, criterion, device):
     model.train()
@@ -33,8 +34,7 @@ def train(model, dataloader, optimizer, criterion, device):
 def main(root_dir, mode, num_classes, freeze_backbone, H, W, epochs, batch_size, lr, encoder_channels, decoder_channels):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    transform = None  # Add any desired transformations here
-
+    transform = transforms
     train_dataset = CamVidDataset(root_dir=root_dir, split='train', mode=mode, transform=transform)
     val_dataset = CamVidDataset(root_dir=root_dir, split='val', mode=mode, transform=transform)
 
@@ -71,7 +71,7 @@ def main(root_dir, mode, num_classes, freeze_backbone, H, W, epochs, batch_size,
 
 if __name__ == '__main__':
     main(
-        root_dir='data',
+        root_dir='./data',
         mode='segmentation',
         num_classes=5,
         freeze_backbone=False,
