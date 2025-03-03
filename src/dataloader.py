@@ -81,6 +81,7 @@ class CamVidDataset(Dataset):
             )
             mask = Image.open(mask_path).convert('RGB')
             mask = self._encode_segmentation(mask)
+
             return image, mask
 
         elif self.mode == 'bbox':

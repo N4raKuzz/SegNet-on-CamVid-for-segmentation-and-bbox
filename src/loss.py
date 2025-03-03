@@ -15,7 +15,7 @@ class DiceLoss(nn.Module):
     def forward(self, pred, target):
         # Apply softmax over the channel dimension.
         pred = F.softmax(pred, dim=1)
-        
+
         # Flatten the spatial dimensions.
         pred_flat = pred.contiguous().view(pred.shape[0], pred.shape[1], -1)
         target_flat = target.contiguous().view(target.shape[0], target.shape[1], -1)
@@ -39,7 +39,10 @@ class WeightedIoULoss(nn.Module):
     """
     def __init__(self, weight=1.0, eps=1e-6):
         super(WeightedIoULoss, self).__init__()
-        self.weight = weight
+        if isinstance(weight, list):
+            self.weight = torch.tensor(weight, dtype=torch.float32)
+        else:
+            self.weight = weight
         self.eps = eps
 
     def forward(self, pred_boxes, target_boxes):
@@ -65,7 +68,15 @@ class WeightedIoULoss(nn.Module):
         # Compute union area.
         union_area = pred_area + target_area - inter_area + self.eps
         
-        # Compute IoU and loss.
+        # Compute IoU.
         iou = inter_area / union_area
-        loss = self.weight * (1 - iou)
-        return loss.mean()
+        loss = (1 - iou)
+        
+        # Apply weight (supports both scalar and tensor weights)
+        if isinstance(self.weight, torch.Tensor):
+            # Ensure weight is broadcastable to loss.
+            loss = self.weight * loss
+        else:
+            loss = self.weight * loss
+
+        return loss, loss.mean()

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-class ResNet34SegDetModel(nn.Module):
+class ResNetSegDetModel(nn.Module):
     def __init__(self, num_anchors=100, confidence_threshold=0.5, num_seg_classes=2):
         """
         Args:
@@ -11,29 +11,24 @@ class ResNet34SegDetModel(nn.Module):
             confidence_threshold (float): Confidence threshold for selecting bounding boxes.
             num_seg_classes (int): Number of segmentation classes.
         """
-        super(ResNet34SegDetModel, self).__init__()
+        super(ResNetSegDetModel, self).__init__()
         self.num_anchors = num_anchors
         self.confidence_threshold = confidence_threshold
         
         # Load pretrained ResNet34 backbone and remove fully connected layers.
-        resnet = models.resnet34(pretrained=True)
+        resnet = models.resnet101(pretrained=True)
         # Keep layers until the final convolutional feature map.
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
         # The output of ResNet34 backbone is of shape (B, 512, H/32, W/32).
         
         # Segmentation head:
-        # Use a few conv layers to refine features and then upsample to the input resolution.
-        self.seg_head = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, num_seg_classes, kernel_size=1)
-        )
-        
-        # Detection head:
-        # Here, we perform global average pooling followed by a linear layer to predict a fixed number of boxes.
-        # Each box is represented by 5 numbers: [xmax, xmin, ymax, ymin, confidence]
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.detector = nn.Linear(512, num_anchors * 5)
+        self.seg_head = SegNet(num_seg_classes)
+        # self.seg_head = nn.Sequential(
+        #     nn.Conv2d(512, 256, kernel_size=3, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(256, num_seg_classes, kernel_size=1)
+        # )
+
         
     def forward(self, x):
         """
@@ -50,21 +45,20 @@ class ResNet34SegDetModel(nn.Module):
         if x.ndim == 4 and x.shape[-1] == 3:
             x = x.permute(0, 3, 1, 2)
             
-        # Pass through the backbone.
-        features = self.backbone(x)  # shape: (B, 512, H/32, W/32)
-        
-        # Segmentation branch:
-        seg_logits = self.seg_head(features)  # shape: (B, num_seg_classes, H/32, W/32)
-        # Upsample segmentation logits to the original input size.
-        seg_logits = F.interpolate(seg_logits, size=(x.shape[2], x.shape[3]), mode='bilinear', align_corners=False)
+        features = self.backbone(x)
+        seg_logits = self.seg_head(features)
+
+        # Upsample segmentation logits to the same spatial size as the input image (or mask)
+        seg_logits = F.interpolate(seg_logits, size=x.shape[2:], mode='bilinear', align_corners=False)
+        # print(seg_logits.shape)
         
         # Detection branch:
-        pooled = self.avgpool(features)  # shape: (B, 512, 1, 1)
-        pooled = pooled.view(pooled.size(0), -1)  # shape: (B, 512)
-        det_preds = self.detector(pooled)  # shape: (B, num_anchors*5)
-        det_preds = det_preds.view(-1, self.num_anchors, 5)  # shape: (B, num_anchors, 5)
+        # pooled = self.avgpool(features)  # shape: (B, 512, 1, 1)
+        # pooled = pooled.view(pooled.size(0), -1)  # shape: (B, 512)
+        # det_preds = self.detector(pooled)  # shape: (B, num_anchors*5)
+        # det_preds = det_preds.view(-1, self.num_anchors, 5)  # shape: (B, num_anchors, 5)
         
-        return seg_logits, det_preds
+        return seg_logits#, det_preds
     
     def postprocess_detections(self, det_preds):
         """
@@ -88,16 +82,109 @@ class ResNet34SegDetModel(nn.Module):
             output_boxes.append(preds[keep])
         return output_boxes
 
-# Example usage:
-if __name__ == "__main__":
-    # Create a dummy input of shape (B, 720, 960, 3)
-    dummy_input = torch.randn(2, 720, 960, 3)
-    model = ResNet34SegDetModel(num_anchors=50, confidence_threshold=0.6, num_seg_classes=3)
+class SegNetEncoder(nn.Module):
+    def __init__(self):
+        super(SegNetEncoder, self).__init__()
+        # Change input channels from 3 to 512
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(2048, 1024, kernel_size=3, padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(1024, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
+        
+        # # Second encoder block
+        # self.enc2 = nn.Sequential(
+        #     nn.Conv2d(64, 128, kernel_size=3, padding=1),
+        #     nn.BatchNorm2d(128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(128, 128, kernel_size=3, padding=1),
+        #     nn.BatchNorm2d(128),
+        #     nn.ReLU(inplace=True)
+        # )
+        # self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
     
-    seg_logits, det_preds = model(dummy_input)
-    print("Segmentation logits shape:", seg_logits.shape)  # Expected: (2, 3, 720, 960)
-    print("Detection predictions shape:", det_preds.shape)  # Expected: (2, 50, 5)
+    def forward(self, x):
+        # x: (B, 3, H, W)
+        x1 = self.enc1(x)                     # (B, 64, H, W)
+        x1p, indices1 = self.pool1(x1)          # (B, 64, H/2, W/2)
+        
+        return x1p, (indices1, None), (x1.size(), None)
+
+class SegNetDecoder(nn.Module):
+    """
+    The Decoder for SegNet.
+    Uses max unpooling with stored indices and convolutional blocks to upsample features.
+    """
+    def __init__(self, num_classes):
+        super(SegNetDecoder, self).__init__()
+        # First decoder block (corresponding to encoder block 2)
+        # self.unpool2 = nn.MaxUnpool2d(kernel_size=2, stride=2)
+        # self.dec2 = nn.Sequential(
+        #     nn.Conv2d(64, 128, kernel_size=3, padding=1),
+        #     nn.BatchNorm2d(128),
+        #     nn.ReLU(inplace=True)
+        # )
+        
+        # Second decoder block (corresponding to encoder block 1)
+        self.unpool1 = nn.MaxUnpool2d(kernel_size=2, stride=2)
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Final 1x1 classifier to map to pixel-wise class scores
+        self.classifier = nn.Conv2d(256, num_classes, kernel_size=1)
     
-    selected_boxes = model.postprocess_detections(det_preds)
-    for i, boxes in enumerate(selected_boxes):
-        print(f"Image {i} has {boxes.shape[0]} boxes above threshold.")
+    def forward(self, x, indices, sizes):
+        """
+        Args:
+            x: Bottleneck feature map from encoder (B, 128, H/4, W/4)
+            indices: Tuple (indices1, indices2) from encoder
+            sizes: Tuple (size1, size2) of encoder feature maps
+        """
+        indices1, indices2 = indices
+        size1, size2 = sizes
+        
+        # Decoder block corresponding to encoder block 2
+        # x = self.unpool2(x, indices2, output_size=size2)  
+        # x = self.dec2(x)                                 
+        
+        # Decoder block corresponding to encoder block 1
+        x = self.unpool1(x, indices1, output_size=size1)  
+        x = self.dec1(x)                                  
+        
+        # Classifier: output logits (B, num_classes, H, W)
+        out = self.classifier(x)
+        return out
+
+class SegNet(nn.Module):
+
+    def __init__(self, num_classes):
+        super(SegNet, self).__init__()
+        self.encoder = SegNetEncoder()
+        self.decoder = SegNetDecoder(num_classes)
+    
+    def forward(self, x):
+        # If input is (B, H, W, 3), permute to (B, 3, H, W)
+        if x.dim() == 4 and x.shape[-1] == 3:
+            x = x.permute(0, 3, 1, 2)
+        
+        # Encoder forward
+        encoded, indices, sizes = self.encoder(x)
+        # Decoder forward
+        logits = self.decoder(encoded, indices, sizes)
+        return logits
