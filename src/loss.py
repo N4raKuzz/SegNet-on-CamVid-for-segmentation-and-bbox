@@ -3,14 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DiceLoss(nn.Module):
-    """
-    Dice Loss for semantic segmentation.
-    The loss expects the model logits (of shape (B, C, H, W)) and the ground truth 
-    in one-hot encoded format (of shape (B, C, H, W)).
-    """
-    def __init__(self, smooth=1.0):
+    def __init__(self, smooth=1.0, weights=None):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
+        self.weights = weights  # Store class weights
 
     def forward(self, pred, target):
         # Apply softmax over the channel dimension.
@@ -27,6 +23,15 @@ class DiceLoss(nn.Module):
         # Compute the dice score and loss.
         dice = (2 * intersection + self.smooth) / (union + self.smooth)
         loss = 1 - dice  # Dice loss for each class.
+        
+        if self.weights is not None:
+            # Convert weights to tensor if it's not already
+            if not isinstance(self.weights, torch.Tensor):
+                weights = torch.tensor(self.weights, device=loss.device)
+            else:
+                weights = self.weights
+            loss = loss * weights
+            return (loss.sum() / weights.sum())  # Weighted average
         
         # Return the mean loss over classes and batch.
         return loss.mean()

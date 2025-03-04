@@ -60,6 +60,18 @@ class ResNetSegDetModel(nn.Module):
         
         return seg_logits#, det_preds
     
+    def print_head(self, mode="segmentation"):
+        """
+        Print the model info for classifier head
+        """
+        if (mode == "segmentation"):
+            print(self.seg_head)
+        elif (mode == "bbox"):
+            print(self.det_head)
+        elif (mode == "combined"):
+            print(self.det_head)
+            print(self.seg_head)
+
     def postprocess_detections(self, det_preds):
         """
         Post-process detection predictions by applying the confidence threshold.

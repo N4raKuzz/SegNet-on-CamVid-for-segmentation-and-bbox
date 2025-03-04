@@ -267,3 +267,82 @@ def evaluate_detection(model, dataloader, device, iou_threshold=0.5):
 
     ap = compute_average_precision(pred_scores_all, pred_matches_all, total_gt)
     return ap
+
+def find_rare_classes_by_average(annotations_json):
+    """
+    Reads bounding box annotations, computes the average count of boxes 
+    across the 5 target classes, and finds which classes are below average 
+    along with how far below.
+
+    Args:
+        annotations_json (str): Path to the JSON file (e.g., train_bbox.json).
+
+    Returns:
+        below_avg_diff (dict): A dictionary of the form {class_id: diff_amount}, 
+                               where diff_amount = (average - class_count) 
+                               if class_count < average, else 0.
+        class_counts (dict): {class_id: total number of bounding boxes} for each of the 5 classes.
+        average_count (float): The average bounding box count across the 5 classes.
+    """
+    # Initialize counts for the 5 classes
+    class_counts = {c: 0 for c in TARGET_CLASSES}
+
+    # Load annotation data
+    with open(annotations_json, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Accumulate bounding box counts
+    for entry in data:
+        bboxes = entry.get("bboxes", [])
+        for bbox in bboxes:
+            cls_id = bbox["class_id"]
+            if cls_id in class_counts:
+                class_counts[cls_id] += 1
+
+    # Compute average box count across the 5 classes
+    total_boxes = sum(class_counts.values())
+    num_classes = len(TARGET_CLASSES)
+    average_count = total_boxes / num_classes  # float
+
+    # Identify classes below average and how far below
+    below_avg_diff = {}
+    for cls_id, count in class_counts.items():
+        if count < average_count:
+            diff = average_count - count  # how many boxes below average
+            below_avg_diff[cls_id] = diff
+        else:
+            below_avg_diff[cls_id] = 0  # not below average
+
+    return below_avg_diff, class_counts, average_count
+
+def find_images_with_classes(annotations_json, target_class_ids):
+    """
+    Identify which images contain any bounding boxes of the given target_class_ids.
+
+    Args:
+        annotations_json (str): Path to the JSON file with bounding box annotations.
+        target_class_ids (list of int): A list of class_ids (e.g. [4, 5] for motorcycle/bus).
+
+    Returns:
+        images_with_rare (list of str): Filenames of images that have at least one bbox 
+                                        belonging to the target_class_ids.
+    """
+    images_with_rare = []
+
+    with open(annotations_json, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Scan each image annotation for bounding boxes
+    for entry in data:
+        file_name = entry["file_name"]
+        bboxes = entry.get("bboxes", [])
+        found = False
+        for bbox in bboxes:
+            cls_id = bbox["class_id"]
+            if cls_id in target_class_ids:
+                found = True
+                break
+        if found:
+            images_with_rare.append(file_name)
+
+    return images_with_rare

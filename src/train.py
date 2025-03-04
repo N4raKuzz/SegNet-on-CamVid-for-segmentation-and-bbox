@@ -12,6 +12,14 @@ from dataloader import CamVidDataset
 from utils import compute_iou, evaluate_segmentation, evaluate_detection
 from torchvision import transforms
 
+TARGET_CLASS_ID = {
+    1: "Bicyclist",
+    2: "Car",
+    3: "Pedestrian",
+    4: "MotorcycleScooter",
+    5: "Truck_Bus"
+}
+
 def collate_fn_bbox(batch):
     images, targets = zip(*batch)
     images = torch.stack(images, dim=0)
@@ -80,14 +88,18 @@ def main():
     batch_size = 5
 
     # --- Initialize model ---
+    print("Initializing model...")
     model = ResNetSegDetModel(num_anchors=num_anchors,
                                 confidence_threshold=confidence_threshold,
                                 num_seg_classes=num_seg_classes)
     model.to(device)
+    model.print_head()
 
     # --- Instantiate loss functions ---
-    dice_loss_fn = DiceLoss(smooth=1.0)
-    iou_loss_fn = WeightedIoULoss(weight=1.0, eps=1e-6)
+    weight_seg = [0, 3.0, 0.8, 1.5, 20.0, 10.0]
+    weight_det = [1.0, 4.0, 2.0, 10.0, 18.0]
+    dice_loss_fn = DiceLoss(smooth=1.0, weights=None)
+    iou_loss_fn = WeightedIoULoss(weight=weight_det, eps=1e-6)
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
     transform = transforms.ToTensor()
     
@@ -105,23 +117,42 @@ def main():
     # val_bbox_loader = DataLoader(val_bbox_dataset, batch_size=batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn_bbox)
 
     # --- Training Loop ---
-    epoch_bar = tqdm(range(epochs), desc="Training", unit="epoch")
-    for epoch in epoch_bar:
+    best_val_iou = 0.0
+    patience = 5
+    counter = 0
+
+    # Ensure the weights directory exists
+    if not os.path.exists('./weights'):
+        os.makedirs('./weights')
+
+    for epoch in range(epochs):
+        print(f"========================== Epoch {epoch+1} ===========================")
+        
+        # --- Training ---
         avg_loss_seg, avg_loss_det = train(model, optimizer, dice_loss_fn, iou_loss_fn, device,
-                                                     train_seg_loader, train_bbox_loader)
-        # print(f"Epoch [{epoch+1}/{epochs}] - Train Dice Loss: {avg_loss_seg:.4f}, Train IoU Loss: {avg_loss_det:.4f}")
-        print(f"Epoch [{epoch+1}/{epochs}] - Train Dice Loss: {avg_loss_seg:.4f}")
+                                        train_seg_loader, train_bbox_loader)
+        print(f"[Train Statistic]: \nEpoch [{epoch+1}/{epochs}] - Train Dice Loss: {avg_loss_seg:.4f}\n")
         
         # --- Validation ---
-        # Evaluate segmentation IoU
         mean_iou, per_class_iou = evaluate_segmentation(model, val_seg_loader, device, num_seg_classes)
-        # Evaluate detection mAP
-        # map_score = evaluate_detection(model, val_bbox_loader, device, iou_threshold=0.5)
+        print(f"[Validation Statistic]: \nEpoch [{epoch+1}/{epochs}] - Validation Mean IoU: {mean_iou:.4f}\n")
+        for class_num, iou_value in zip(TARGET_CLASS_ID.keys(), per_class_iou):
+            print(f"Class {class_num} | {TARGET_CLASS_ID[class_num]}: IoU = {iou_value:.4f}")
         
-        epoch_bar.set_postfix({
-            'Train Dice': f"{avg_loss_seg:.4f}",
-            'Val Mean IoU': f"{mean_iou:.4f}"
-        })
+        # --- Save Best Model and Early Stopping ---
+        if mean_iou > best_val_iou:
+            best_val_iou = mean_iou
+            counter = 0  # reset counter on improvement
+            # Save best model state
+            torch.save(model.state_dict(), f'./weights/Res101SegNet_lr{lr}_weightNone.pth')
+            print(f"Best model saved with Validation Mean IoU: {best_val_iou:.4f}")
+        else:
+            counter += 1
+            print(f"No improvement. Early stopping counter: {counter}/{patience}")
+            if counter >= patience:
+                print("Early stopping triggered.")
+                break
+
         
 if __name__ == "__main__":
     main()

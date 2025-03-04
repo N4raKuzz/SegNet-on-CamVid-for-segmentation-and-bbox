@@ -24,9 +24,6 @@ if __name__ == "__main__":
 
 
 """
-python annotate.py \
-    --images_dir ./data/CamVid/val/images/ \
-    --masks_dir ./data/CamVid/val/masks/ \
-    --output_json ./data/annotations/val_annotations.json
+python annotate.py --images_dir ./data/CamVid/train/images/ --masks_dir ./data/CamVid/train/masks/ --output_json ./data/annotations/train_annotations.json
 
 """

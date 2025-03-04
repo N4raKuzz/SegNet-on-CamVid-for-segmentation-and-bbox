@@ -1,6 +1,31 @@
 import os
 import cv2
 import json
+import random
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+TARGET_CLASS_COLORS = {
+    (0, 128, 192): 1,   # Bicyclist
+    (64, 0, 128): 2,    # Car
+    (64, 64, 0): 3,     # Pedestrian
+    (192, 0, 192): 4,   # MotorcycleScooter
+    (192, 128, 192): 5  # Truck_Bus
+}
+
+TARGET_CLASS_ID = {
+    1: "Bicyclist",
+    2: "Car",
+    3: "Pedestrian",
+    4: "MotorcycleScooter",
+    5: "Truck_Bus"
+}
+
+CLASS_COLOR_MAPPING = {0: (0, 0, 0)}
+for color, label in TARGET_CLASS_COLORS.items():
+    CLASS_COLOR_MAPPING[label] = color
 
 def visualize_single_image_and_mask(image_path, mask_path, annotation_json_path):
     """
@@ -36,15 +61,6 @@ def visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
     mask = cv2.imread(mask_path)
     mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB) if mask is not None else None
 
-    # Color map for different class_ids.
-    color_map = {
-        1: (0, 0, 255),   
-        2: (0, 255, 0),   
-        3: (255, 0, 0),  
-        4: (0, 255, 255), 
-        5: (255, 255, 0)
-    }
-    
     # Print BBoxes
     bboxes = annotation_for_image.get("bboxes", [])
     for bbox in bboxes:
@@ -55,7 +71,7 @@ def visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
         y_max = bbox["y_max"]
         
         # Pick the color
-        color = color_map.get(class_id, (255, 255, 255))
+        color = TARGET_CLASS_COLORS.get(class_id, (255, 255, 255))
         thickness = 2
         
         # Draw on the image
@@ -74,15 +90,108 @@ def visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
         
     return image, mask
 
-
-# Example usage:
-if __name__ == "__main__":
-    image_path = "./data/CamVid/test/images/0001TP_006690.png"
-    mask_path  = "./data/CamVid/test/masks/0001TP_006690_L.png"
-    annotation_json_path = "./data/annotations/test_annotations.json"
+def colorize_mask(mask):
+    """
+    Convert a segmentation mask (with class labels) into a color image.
+    This is used for the predicted mask.
     
-    image, mask = visualize_single_image_and_mask(image_path, mask_path, annotation_json_path)
-    cv2.imshow("Visualized Image", image)
-    cv2.imshow("Visualized Mask", mask)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    :param mask: numpy array of shape (H, W) with integer labels.
+    :return: numpy array of shape (H, W, 3) with RGB colors.
+    """
+    h, w = mask.shape
+    color_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    for cls, color in CLASS_COLOR_MAPPING.items():
+        color_mask[mask == cls] = color
+    return color_mask
+
+def colorize_target_mask(mask):
+    """
+    Convert a target segmentation mask (with class ids) into a color image using TARGET_CLASS_COLORS.
+    
+    :param mask: numpy array of shape (H, W) with integer labels.
+    :return: numpy array of shape (H, W, 3) with RGB colors.
+    """
+    h, w = mask.shape
+    color_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    # Invert the mapping: from class id to color.
+    target_id_to_color = {class_id: color for color, class_id in TARGET_CLASS_COLORS.items()}
+    for class_id, color in target_id_to_color.items():
+        color_mask[mask == class_id] = color
+    return color_mask
+
+def visualize_predictions(model, dataset, device, num_samples=10):
+    """
+    Randomly select samples from the dataset, run inference, and save a figure 
+    with two subplots per sample:
+      - The first subplot shows the original image with the target mask overlay.
+      - The second subplot shows the original image with the predicted mask overlay.
+    A figure-level legend is added at the top, displaying the color-class-classid mapping.
+    The resulting figure is saved in the "results" folder.
+    """
+    model.eval()
+    indices = random.sample(range(len(dataset)), num_samples)
+    plt.figure(figsize=(10, 5 * num_samples))
+    
+    # Create an inverted mapping for legend: class id -> color.
+    target_id_to_color = {class_id: color for color, class_id in TARGET_CLASS_COLORS.items()}
+    
+    for i, idx in enumerate(indices):
+        image, target_mask = dataset[idx]  # includes ground-truth mask
+        # The image is a tensor of shape (C, H, W). Add batch dim.
+        input_tensor = image.unsqueeze(0).to(device)
+
+        # Get predicted mask.
+        with torch.no_grad():
+            seg_logits = model(input_tensor)
+            pred_mask = seg_logits.argmax(dim=1).squeeze(0).cpu().numpy()
+
+        # Colorize predicted mask.
+        pred_mask_color = colorize_mask(pred_mask)
+        # Colorize target mask.
+        colored_target_mask = colorize_target_mask(target_mask)
+        # Convert image tensor to numpy array (H, W, C) for visualization.
+        img_np = image.permute(1, 2, 0).cpu().numpy()
+        img_np = (img_np * 255).astype(np.uint8) if img_np.max() <= 1.0 else img_np
+
+        # First subplot: original image with target mask overlay.
+        ax1 = plt.subplot(num_samples, 2, 2 * i + 1)
+        ax1.imshow(img_np)
+        ax1.imshow(colored_target_mask, alpha=0.5)
+        ax1.set_title("Target Mask Overlay")
+        ax1.axis("off")
+
+        # Second subplot: original image with predicted mask overlay.
+        ax2 = plt.subplot(num_samples, 2, 2 * i + 2)
+        ax2.imshow(img_np)
+        ax2.imshow(pred_mask_color, alpha=0.5)
+        ax2.set_title("Predicted Mask Overlay")
+        ax2.axis("off")
+    
+    # Create legend patches with line breaks in the label.
+    patches = []
+    for class_id, class_name in TARGET_CLASS_ID.items():
+        color = target_id_to_color.get(class_id, (0, 0, 0))
+        normalized_color = tuple([c / 255 for c in color])
+        # Add \n for multi-line labels
+        label = f"{color}\n{class_name} - {class_id}"
+        patches.append(mpatches.Patch(color=normalized_color, label=label))
+    
+    # Add a figure-level legend at the top (with extra top margin).
+    # 'bbox_to_anchor' moves the legend, 'ncol' sets how many patches per row.
+    plt.figlegend(
+        handles=patches, 
+        loc='upper center', 
+        ncol=len(patches), 
+        bbox_to_anchor=(0.5, 1.15)
+    )
+    
+    # Increase the top margin so the legend is not clipped.
+    plt.subplots_adjust(top=0.80)
+    
+    # Ensure the 'results' directory exists.
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    
+    # Save the figure.
+    plt.savefig("results/predictions.png")
+    plt.close()
