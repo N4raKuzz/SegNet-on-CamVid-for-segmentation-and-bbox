@@ -15,8 +15,8 @@ class ResNetSegDetModel(nn.Module):
         self.num_anchors = num_anchors
         self.confidence_threshold = confidence_threshold
         
-        # Load pretrained ResNet34 backbone and remove fully connected layers.
-        resnet = models.resnet101(pretrained=True)
+        # Load pretrained ResNet backbone and remove fully connected layers.
+        resnet = models.resnet34(pretrained=True)
         # Keep layers until the final convolutional feature map.
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
         # The output of ResNet34 backbone is of shape (B, 512, H/32, W/32).
@@ -99,17 +99,23 @@ class SegNetEncoder(nn.Module):
         super(SegNetEncoder, self).__init__()
         # Change input channels from 3 to 512
         self.enc1 = nn.Sequential(
-            nn.Conv2d(2048, 1024, kernel_size=3, padding=1),
-            nn.BatchNorm2d(1024),
+            # nn.Conv2d(2048, 1024, kernel_size=3, padding=1),
+            # nn.BatchNorm2d(1024),
+            # nn.ReLU(inplace=True),
+            # nn.Conv2d(1024, 512, kernel_size=3, padding=1),
+            # nn.BatchNorm2d(512),
+            # nn.ReLU(inplace=True),
+            nn.Conv2d(512, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.Conv2d(1024, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(512, 128, kernel_size=3, padding=1),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(inplace=True)
         )
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
@@ -150,6 +156,9 @@ class SegNetDecoder(nn.Module):
         # Second decoder block (corresponding to encoder block 1)
         self.unpool1 = nn.MaxUnpool2d(kernel_size=2, stride=2)
         self.dec1 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -159,7 +168,15 @@ class SegNetDecoder(nn.Module):
         )
         
         # Final 1x1 classifier to map to pixel-wise class scores
-        self.classifier = nn.Conv2d(256, num_classes, kernel_size=1)
+        self.classifier = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, num_classes, kernel_size=1)
+        )
     
     def forward(self, x, indices, sizes):
         """

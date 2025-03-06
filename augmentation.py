@@ -17,9 +17,7 @@ INPUT_WIDTH = 960
 # (192,0,192) in RGB remains (192,0,192) in BGR -> MotorcycleScooter
 # (192,128,192) in RGB remains (192,128,192) in BGR -> Truck_Bus
 RARE_COLORS_BGR = [
-    (192, 128, 0),   # Bicyclist
     (192, 0, 192),   # MotorcycleScooter
-    (192, 128, 192)  # Truck_Bus
 ]
 
 def find_rare_class():
@@ -107,9 +105,9 @@ def augment_hsv(image, mask):
     """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
     # Adjustments: these parameters can be tuned.
-    hue_shift = 10.0        # shift hue by 10 degrees (0-180 in OpenCV)
-    sat_mult = 1.1          # increase saturation by 10%
-    val_mult = 1.1          # increase brightness by 10%
+    hue_shift = -10.0        # shift hue by 10 degrees (0-180 in OpenCV)
+    sat_mult = 0.8          # increase saturation by 10%
+    val_mult = 1.2          # increase brightness by 10%
 
     hsv[..., 0] = (hsv[..., 0] + hue_shift) % 180
     hsv[..., 1] = np.clip(hsv[..., 1] * sat_mult, 0, 255)
@@ -151,17 +149,13 @@ def augmentation_pipeline():
             print(f"Error reading {sample}. Skipping.")
             continue
         
-        # 1. Rotation augmentation
-        rotated_img, rotated_mask = augment_rotate(image, mask)
-        save_augmented(rotated_img, rotated_mask, sample, "rotate")
+        # # 1. Rotation augmentation
+        # rotated_img, rotated_mask = augment_rotate(image, mask)
+        # save_augmented(rotated_img, rotated_mask, sample, "rotate")
         
-        # 2. Zoom in augmentation
-        zoomed_img, zoomed_mask = augment_zoom(image, mask)
-        save_augmented(zoomed_img, zoomed_mask, sample, "zoom")
-        
-        # 3. HSV adjustment augmentation
+        # 2. HSV adjustment augmentation
         hsv_img, hsv_mask = augment_hsv(image, mask)
-        save_augmented(hsv_img, hsv_mask, sample, "hsv")
+        save_augmented(hsv_img, hsv_mask, sample, "hsv2")
 
 if __name__ == "__main__":
     augmentation_pipeline()

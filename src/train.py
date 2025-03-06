@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from loss import DiceLoss, WeightedIoULoss
+from loss import DiceLoss, WeightedIoULoss, FocalLoss
 from model import ResNetSegDetModel
 from dataloader import CamVidDataset
 from utils import compute_iou, evaluate_segmentation, evaluate_detection
@@ -25,7 +25,7 @@ def collate_fn_bbox(batch):
     images = torch.stack(images, dim=0)
     return images, list(targets)
 
-def train(model, optimizer, dice_loss_fn, iou_loss_fn, device, seg_dataloader, bbox_dataloader):
+def train(model, optimizer, dice_loss_fn, focal_loss_fn, iou_loss_fn, device, seg_dataloader, bbox_dataloader):
     model.train()
     running_loss_seg = 0.0
     running_loss_det = 0.0
@@ -43,8 +43,10 @@ def train(model, optimizer, dice_loss_fn, iou_loss_fn, device, seg_dataloader, b
         # print(f"seg logits {seg_logits.shape}")
         num_seg_classes = seg_logits.size(1)
         # Convert masks to one-hot encoding: (B, H, W) -> (B, C, H, W)
-        masks_one_hot = F.one_hot(masks.long(), num_classes=6).permute(0, 3, 1, 2).float()
-        loss_seg = dice_loss_fn(seg_logits, masks_one_hot)
+        masks_one_hot = F.one_hot(masks.long(), num_classes=32).permute(0, 3, 1, 2).float()
+        loss_dice = dice_loss_fn(seg_logits, masks_one_hot)
+        loss_focal = focal_loss_fn(seg_logits, masks_one_hot)
+        loss_seg = loss_focal + loss_dice
 
         # # --- Detection branch ---
         # images_bbox = images_bbox.to(device)
@@ -81,11 +83,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # --- Hyperparameters ---
     num_anchors = 50
-    num_seg_classes = 6  
+    num_seg_classes = 32 
     confidence_threshold = 0.6
     lr = 1e-4
-    epochs = 20
-    batch_size = 5
+    epochs = 30
+    batch_size = 6
 
     # --- Initialize model ---
     print("Initializing model...")
@@ -96,10 +98,16 @@ def main():
     model.print_head()
 
     # --- Instantiate loss functions ---
-    weight_seg = [0, 3.0, 0.8, 1.5, 20.0, 10.0]
-    weight_det = [1.0, 4.0, 2.0, 10.0, 18.0]
-    dice_loss_fn = DiceLoss(smooth=1.0, weights=None)
-    iou_loss_fn = WeightedIoULoss(weight=weight_det, eps=1e-6)
+    alpha = torch.ones(32)
+    alpha[2] = 1.6     # Bicyclist
+    alpha[5] = 1.2     # Car
+    alpha[16] = 1.6    # Pedestrian
+    alpha[13] = 4.0    # MotorcycleScooter
+    alpha[27] = 3.0    # Truck_Bus
+    alpha_list = alpha.tolist()
+    dice_loss_fn = DiceLoss(smooth=1.0)
+    focal_loss_fn = FocalLoss(gamma=2.0, alpha=alpha_list)
+    iou_loss_fn = WeightedIoULoss()
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
     transform = transforms.ToTensor()
     
@@ -114,11 +122,11 @@ def main():
     val_seg_dataset = CamVidDataset(root_dir=root_dir, split='val', mode='segmentation', transform=transform)
     # val_bbox_dataset = CamVidDataset(root_dir=root_dir, split='val', mode='bbox', transform=transform)
     val_seg_loader = DataLoader(val_seg_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-    # val_bbox_loader = DataLoader(val_bbox_dataset, batch_size=batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn_bbox)
+    # val_bbox_loader = DataLoader(val_wbbox_dataset, batch_size=batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn_bbox)
 
     # --- Training Loop ---
     best_val_iou = 0.0
-    patience = 5
+    patience = 10
     counter = 0
 
     # Ensure the weights directory exists
@@ -129,12 +137,12 @@ def main():
         print(f"========================== Epoch {epoch+1} ===========================")
         
         # --- Training ---
-        avg_loss_seg, avg_loss_det = train(model, optimizer, dice_loss_fn, iou_loss_fn, device,
+        avg_loss_seg, avg_loss_det = train(model, optimizer, dice_loss_fn, focal_loss_fn, iou_loss_fn, device,
                                         train_seg_loader, train_bbox_loader)
-        print(f"[Train Statistic]: \nEpoch [{epoch+1}/{epochs}] - Train Dice Loss: {avg_loss_seg:.4f}\n")
+        print(f"[Train Statistic]: \nEpoch [{epoch+1}/{epochs}] - Train Combined Loss: {avg_loss_seg:.4f}\n")
         
         # --- Validation ---
-        mean_iou, per_class_iou = evaluate_segmentation(model, val_seg_loader, device, num_seg_classes)
+        mean_iou, per_class_iou = evaluate_segmentation(model, val_seg_loader, device)        
         print(f"[Validation Statistic]: \nEpoch [{epoch+1}/{epochs}] - Validation Mean IoU: {mean_iou:.4f}\n")
         for class_num, iou_value in zip(TARGET_CLASS_ID.keys(), per_class_iou):
             print(f"Class {class_num} | {TARGET_CLASS_ID[class_num]}: IoU = {iou_value:.4f}")
@@ -144,7 +152,7 @@ def main():
             best_val_iou = mean_iou
             counter = 0  # reset counter on improvement
             # Save best model state
-            torch.save(model.state_dict(), f'./weights/Res101SegNet_lr{lr}_weightNone.pth')
+            torch.save(model.state_dict(), f'./weights/Res34SegNet_fullclass_DataAuged_combined3.pth')
             print(f"Best model saved with Validation Mean IoU: {best_val_iou:.4f}")
         else:
             counter += 1

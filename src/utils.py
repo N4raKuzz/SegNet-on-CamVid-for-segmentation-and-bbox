@@ -21,6 +21,14 @@ TARGET_CLASS_COLORS = {
     (192, 128, 192): 5  # Truck_Bus
 }
 
+TRAIN_TO_EVAL_MAPPING = {
+    2: 1,   # Bicyclist
+    5: 2,   # Car
+    16: 3,  # Pedestrian
+    13: 4,  # MotorcycleScooter
+    27: 5   # Truck_Bus
+}
+
 def get_bounding_boxes_for_class(binary_mask, class_id):
     """
     Given a binary mask (mask == 255 => that pixel belongs to the class),
@@ -156,34 +164,59 @@ def compute_iou(box1, box2):
     union_area = box1_area + box2_area - inter_area + 1e-6
     return inter_area / union_area
 
-def evaluate_segmentation(model, dataloader, device, num_classes):
+def evaluate_segmentation(model, dataloader, device):
     """
-    Evaluate segmentation performance by computing mean IoU.
+    Evaluate segmentation performance by computing mean IoU for the desired target classes.
+    
+    The model outputs predictions over 32 classes. Using `target_mapping`, we map these predictions
+    to the 5 evaluation classes. Ground truth masks should already be encoded in the evaluation 
+    domain (e.g., using your TEST_CLASS_COLORS mapping).
+
+    :param model: the segmentation model.
+    :param dataloader: DataLoader providing (image, mask) pairs.
+    :param device: computation device 
+    :return: mean IoU (float) and IoU per evaluation class (numpy array).
     """
     model.eval()
-    total_intersections = np.zeros(num_classes)
-    total_unions = np.zeros(num_classes)
+    
+    # Determine the evaluation class ids (e.g., [1, 2, 3, 4, 5])
+    eval_class_ids = sorted(set(TRAIN_TO_EVAL_MAPPING.values()))
+    
+    # Initialize intersection and union accumulators for each evaluation class.
+    total_intersections = {cls: 0 for cls in eval_class_ids}
+    total_unions = {cls: 0 for cls in eval_class_ids}
+    
     with torch.no_grad():
         for images, masks in dataloader:
             images = images.to(device)
-            masks = masks.to(device)  
-            # print(masks.shape)
+            masks = masks.to(device)
+            
             # If masks are one-hot encoded, convert to class indices.
             if masks.dim() == 4:
-                masks = masks.argmax(dim=1)  # now shape: (B, H, W)
+                masks = masks.argmax(dim=1)  # shape: (B, H, W)
                 
-            seg_logits = model(images)
-            # print(seg_logits.shape)
-            preds = seg_logits.argmax(dim=1)  # shape: (B, H, W)
+            seg_logits = model(images)  # shape: (B, 32, H, W)
+            preds = seg_logits.argmax(dim=1)  # shape: (B, H, W), values in [0, 31]
             
-            for cls in range(num_classes):
-                intersection = ((preds == cls) & (masks == cls)).sum().item()
-                union = ((preds == cls) | (masks == cls)).sum().item()
+            # Map the 32-class predictions to the 5 desired classes.
+            mapped_preds = torch.zeros_like(preds)
+            for train_cls, eval_cls in TRAIN_TO_EVAL_MAPPING.items():
+                mapped_preds[preds == train_cls] = eval_cls
+                
+            # Compute intersection and union for each evaluation class.
+            for cls in eval_class_ids:
+                intersection = ((mapped_preds == cls) & (masks == cls)).sum().item()
+                union = ((mapped_preds == cls) | (masks == cls)).sum().item()
                 total_intersections[cls] += intersection
                 total_unions[cls] += union
-
-    iou_per_class = total_intersections / (total_unions + 1e-6)
+                
+    # Calculate IoU per class and mean IoU.
+    iou_per_class = np.array([
+        total_intersections[cls] / (total_unions[cls] + 1e-6) 
+        for cls in eval_class_ids
+    ])
     mean_iou = iou_per_class.mean()
+    
     return mean_iou, iou_per_class
 
 

@@ -23,7 +23,7 @@ def main():
     num_anchors = 50
     num_seg_classes = 6  # includes background (0) + 5 classes
     confidence_threshold = 0.6
-    lr = 1e-4
+    lr = 5e-5
 
     # --- Initialize the model ---
     model = ResNetSegDetModel(num_anchors=num_anchors,
@@ -32,7 +32,7 @@ def main():
     model.to(device)
 
     # --- Load trained weights ---
-    weight_path = './weights/Res101SegNet_lr1e-4_dice.pth'
+    weight_path = './weights/Res101SegNet_fullclass_DataAuged_dice.pth'
     if os.path.exists(weight_path):
         model.load_state_dict(torch.load(weight_path, map_location=device))
         print("Model weights loaded.")
@@ -48,6 +48,7 @@ def main():
     test_seg_loader = DataLoader(test_seg_dataset, batch_size=1, shuffle=False, num_workers=4)
 
     mean_iou, per_class_iou = evaluate_segmentation(model, test_seg_loader, device, num_seg_classes)
+    print(per_class_iou)
     print(f"[Test Statistic]: \nMean IoU: {mean_iou:.4f}\n")
     for class_num, iou_value in zip(TARGET_CLASS_ID.keys(), per_class_iou):
         print(f"Class {class_num} | {TARGET_CLASS_ID[class_num]}: IoU = {iou_value:.4f}")
