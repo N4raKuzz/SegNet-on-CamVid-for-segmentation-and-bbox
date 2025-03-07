@@ -1,9 +1,13 @@
 import os
-import json
 import cv2
-import numpy as np
+import json
+import random
 import torch
 import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
 
 # Map from each RGB color -> integer class ID
 # class_ids: 
@@ -20,6 +24,18 @@ TARGET_CLASS_COLORS = {
     (192, 0, 192): 4,   # MotorcycleScooter
     (192, 128, 192): 5  # Truck_Bus
 }
+
+TARGET_CLASS_ID = {
+    1: "Bicyclist",
+    2: "Car",
+    3: "Pedestrian",
+    4: "MotorcycleScooter",
+    5: "Truck_Bus"
+}
+
+CLASS_COLOR_MAPPING = {0: (0, 0, 0)}
+for color, label in TARGET_CLASS_COLORS.items():
+    CLASS_COLOR_MAPPING[label] = color
 
 TRAIN_TO_EVAL_MAPPING = {
     2: 1,   # Bicyclist
@@ -379,3 +395,229 @@ def find_images_with_classes(annotations_json, target_class_ids):
             images_with_rare.append(file_name)
 
     return images_with_rare
+
+def visualize_single_image_and_mask(image_path, mask_path, annotation_json_path):
+
+    with open(annotation_json_path, "r") as f:
+        annotations = json.load(f)
+    image_filename = os.path.basename(image_path) 
+    # Find the annotation entry for this filename
+    annotation_for_image = None
+    for ann in annotations:
+        if ann["filename"] == image_filename:
+            annotation_for_image = ann
+            break
+    
+    if annotation_for_image is None:
+        print(f"[WARNING] No annotation found in '{annotation_json_path}' for '{image_filename}'.")
+        return
+    
+    image = cv2.imread(image_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if image is not None else None
+    
+    mask = cv2.imread(mask_path)
+    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB) if mask is not None else None
+
+    bboxes = annotation_for_image.get("bboxes", [])
+    for bbox in bboxes:
+        class_id = bbox["class_id"]
+        x_min = bbox["x_min"]
+        x_max = bbox["x_max"]
+        y_min = bbox["y_min"]
+        y_max = bbox["y_max"]
+        
+        color = TARGET_CLASS_COLORS.get(class_id, (255, 255, 255))
+        thickness = 2
+        
+        cv2.rectangle(image, (x_min, y_min), (x_max, y_max), color, thickness)
+        cv2.putText(image, f"ID:{class_id}", (x_min, max(y_min - 5, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        cv2.rectangle(mask, (x_min, y_min), (x_max, y_max), color, thickness)
+        cv2.putText(mask, f"ID:{class_id}", (x_min, max(y_min - 5, 0)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        print(f"Class ID: {class_id}, BBox => (x_min={x_min}, x_max={x_max}, "
+              f"y_min={y_min}, y_max={y_max})")
+        
+    return image, mask
+
+def colorize_mask(mask):
+    """
+    Convert a segmentation mask (with class labels) into a color image.
+    """
+    h, w = mask.shape
+    color_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    for cls, color in CLASS_COLOR_MAPPING.items():
+        color_mask[mask == cls] = color
+    return color_mask
+
+def colorize_target_mask(mask):
+    """
+    Convert a target segmentation mask (with class ids) into a color image using TARGET_CLASS_COLORS.
+    """
+    h, w = mask.shape
+    color_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    # Invert the mapping: from class id to color.
+    target_id_to_color = {class_id: color for color, class_id in TARGET_CLASS_COLORS.items()}
+    for class_id, color in target_id_to_color.items():
+        color_mask[mask == class_id] = color
+    return color_mask
+
+def visualize_predictions(model, dataset, device, num_samples=10):
+
+    model.eval()
+    indices = random.sample(range(len(dataset)), num_samples)
+    plt.figure(figsize=(10, 5 * num_samples))
+    
+    # Create an inverted mapping for legend: class id -> color.
+    target_id_to_color = {class_id: color for color, class_id in TARGET_CLASS_COLORS.items()}
+    
+    for i, idx in enumerate(indices):
+        image, target_mask = dataset[idx]  # includes ground-truth mask
+        # The image is a tensor of shape (C, H, W). Add batch dim.
+        input_tensor = image.unsqueeze(0).to(device)
+
+        # Get predicted mask.
+        with torch.no_grad():
+            seg_logits = model(input_tensor)
+            pred_mask = seg_logits.argmax(dim=1).squeeze(0).cpu().numpy()
+
+        # Colorize predicted mask.
+        pred_mask_color = colorize_mask(pred_mask)
+        # Colorize target mask.
+        colored_target_mask = colorize_target_mask(target_mask)
+        # Convert image tensor to numpy array (H, W, C) for visualization.
+        img_np = image.permute(1, 2, 0).cpu().numpy()
+        img_np = (img_np * 255).astype(np.uint8) if img_np.max() <= 1.0 else img_np
+
+        # First subplot: original image with target mask overlay.
+        ax1 = plt.subplot(num_samples, 2, 2 * i + 1)
+        ax1.imshow(img_np)
+        ax1.imshow(colored_target_mask, alpha=0.5)
+        ax1.set_title("Target Mask Overlay")
+        ax1.axis("off")
+
+        # Second subplot: original image with predicted mask overlay.
+        ax2 = plt.subplot(num_samples, 2, 2 * i + 2)
+        ax2.imshow(img_np)
+        ax2.imshow(pred_mask_color, alpha=0.5)
+        ax2.set_title("Predicted Mask Overlay")
+        ax2.axis("off")
+    
+    # Create legend patches with line breaks in the label.
+    patches = []
+    for class_id, class_name in TARGET_CLASS_ID.items():
+        color = target_id_to_color.get(class_id, (0, 0, 0))
+        normalized_color = tuple([c / 255 for c in color])
+        # Add \n for multi-line labels
+        label = f"{color}\n{class_name} - {class_id}"
+        patches.append(mpatches.Patch(color=normalized_color, label=label))
+    
+    # Add a figure-level legend at the top (with extra top margin).
+    # 'bbox_to_anchor' moves the legend, 'ncol' sets how many patches per row.
+    plt.figlegend(
+        handles=patches, 
+        loc='upper center', 
+        ncol=len(patches), 
+        bbox_to_anchor=(0.5, 1.15)
+    )
+    
+    # Increase the top margin so the legend is not clipped.
+    plt.subplots_adjust(top=0.80)
+    
+    # Ensure the 'results' directory exists.
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    
+    # Save the figure.
+    plt.savefig("results/predictions.png")
+    plt.close()
+
+
+def generate_proposals(seg_logits, seg_threshold=0.5, min_area=50):
+    """
+    Generate bounding box proposals from segmentation output.
+    
+    Args:
+        seg_logits (torch.Tensor): Segmentation logits of shape (B, num_seg_classes, H, W).
+                                   We assume a binary segmentation (2 channels) where channel 1 is foreground.
+        seg_threshold (float): Threshold for foreground probability.
+        min_area (int): Minimum area (in pixels) for a detected region to be considered.
+        
+    Returns:
+        proposals (list of torch.Tensor): A list of length B. For each image, a tensor of shape (N, 5)
+                                          where each row is [xmin, ymin, xmax, ymax, confidence].
+                                          The coordinates are in the original image scale.
+    """
+    proposals_batch = []
+    # Compute probabilities (assumes binary segmentation with two channels)
+    probs = torch.softmax(seg_logits, dim=1)  # shape: (B, 2, H, W)
+    # Use channel 1 as foreground probability.
+    foreground_prob = probs[:, 1].detach().cpu().numpy()  # shape: (B, H, W)
+    
+    B = seg_logits.shape[0]
+    for i in range(B):
+        prob_map = foreground_prob[i]
+        # Threshold to get a binary mask.
+        mask = (prob_map > seg_threshold).astype(np.uint8)
+        # Find contours (external only) using OpenCV.
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        proposals = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area >= min_area:
+                x, y, w, h = cv2.boundingRect(cnt)
+                # Compute a confidence score as the average foreground probability in this region.
+                region = prob_map[y:y+h, x:x+w]
+                conf = float(np.mean(region))
+                # Format: [xmin, ymin, xmax, ymax, confidence]
+                proposals.append([x, y, x + w, y + h, conf])
+        if proposals:
+            proposals_tensor = torch.tensor(proposals, dtype=torch.float32, device=seg_logits.device)
+        else:
+            proposals_tensor = torch.empty((0, 5), dtype=torch.float32, device=seg_logits.device)
+        proposals_batch.append(proposals_tensor)
+    return proposals_batch
+
+def roi_pooling(feature_map, boxes, output_size=(7, 7)):
+    """
+    A simple ROI pooling operation.
+    
+    Args:
+        feature_map (torch.Tensor): Feature map of shape (C, H, W).
+        boxes (torch.Tensor): Tensor of shape (N, 4) containing bounding boxes
+                              in the coordinate space of feature_map (i.e. already scaled).
+                              Each box is [xmin, ymin, xmax, ymax].
+        output_size (tuple): Desired output size (height, width) for each ROI.
+        
+    Returns:
+        rois (torch.Tensor): Tensor of shape (N, C, output_size[0], output_size[1]).
+    """
+    pooled_rois = []
+    C, H, W = feature_map.shape
+    for box in boxes:
+        xmin, ymin, xmax, ymax = box
+        # Convert to integer indices.
+        xmin = int(torch.floor(xmin).item())
+        ymin = int(torch.floor(ymin).item())
+        xmax = int(torch.ceil(xmax).item())
+        ymax = int(torch.ceil(ymax).item())
+        # Clamp coordinates to the feature map dimensions.
+        xmin = max(0, xmin)
+        ymin = max(0, ymin)
+        xmax = min(W, xmax)
+        ymax = min(H, ymax)
+        # If the region is empty, use a zeros tensor.
+        if xmax <= xmin or ymax <= ymin:
+            roi = torch.zeros((C, output_size[0], output_size[1]), device=feature_map.device)
+        else:
+            roi = feature_map[:, ymin:ymax, xmin:xmax]
+            # Use adaptive average pooling to get a fixed output size.
+            roi = F.adaptive_avg_pool2d(roi, output_size)
+        pooled_rois.append(roi)
+    if pooled_rois:
+        return torch.stack(pooled_rois, dim=0)
+    else:
+        return torch.empty((0, C, output_size[0], output_size[1]), device=feature_map.device)
+

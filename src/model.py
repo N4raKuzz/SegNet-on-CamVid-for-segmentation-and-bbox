@@ -3,102 +3,94 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
+from utils import generate_proposals, roi_pooling
 class ResNetSegDetModel(nn.Module):
-    def __init__(self, num_anchors=100, confidence_threshold=0.5, num_seg_classes=2):
+    def __init__(self,
+                 num_classes=6,
+                 mode='segmentation',
+                 seg_threshold=0.4,
+                 min_area=50):
         """
         Args:
-            num_anchors (int): Number of anchor boxes (i.e. number of detection predictions).
-            confidence_threshold (float): Confidence threshold for selecting bounding boxes.
-            num_seg_classes (int): Number of segmentation classes.
+            num_classes (int): Number of segmentation classes.
+            mode (str): 'segmentation', 'bbox', or 'combined'.
+            seg_threshold (float): Threshold for generating proposals from seg logits.
+            min_area (int): Minimum connected component area to generate a proposal.
         """
         super(ResNetSegDetModel, self).__init__()
-        self.num_anchors = num_anchors
-        self.confidence_threshold = confidence_threshold
+        self.mode = mode
+        self.seg_threshold = seg_threshold
+        self.min_area = min_area
         
-        # Load pretrained ResNet backbone and remove fully connected layers.
+        # Backbone
         resnet = models.resnet34(pretrained=True)
-        # Keep layers until the final convolutional feature map.
-        self.backbone = nn.Sequential(*list(resnet.children())[:-2])
-        # The output of ResNet34 backbone is of shape (B, 512, H/32, W/32).
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])  # (B, 512, H/32, W/32)
         
-        # Segmentation head:
-        self.seg_head = SegNet(num_seg_classes)
-        # self.seg_head = nn.Sequential(
-        #     nn.Conv2d(512, 256, kernel_size=3, padding=1),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv2d(256, num_seg_classes, kernel_size=1)
-        # )
-
+        # Segmentation head
+        self.seg_head = SegNet(num_classes)  # out_channels = num_classes
         
+        # Detection head
+        self.det_head = RCNN(in_channels=512, pooled_size=(7,7), scale_factor=1/32)
+        self.selected_det_indices = [2, 5, 16, 13, 27]
+    
     def forward(self, x):
         """
-        Forward pass of the model.
         Args:
-            x (torch.Tensor): Input tensor. Expected shape: either (B, 3, 720, 960)
-                              or (B, 720, 960, 3) (in which case it will be permuted).
+            x (torch.Tensor): Shape (B, 3, H, W).
         Returns:
-            seg_logits (torch.Tensor): Segmentation logits of shape (B, num_seg_classes, 720, 960).
-            det_preds (torch.Tensor): Detection predictions of shape (B, num_anchors, 5)
-                                      where the last dimension is [xmax, xmin, ymax, ymin, confidence].
+            seg_logits (torch.Tensor or None)
+            det_preds (list[torch.Tensor] or None)
         """
-        # If input is in (B, H, W, C) format, permute it to (B, C, H, W)
+        # Permute if input is (B, H, W, 3)
         if x.ndim == 4 and x.shape[-1] == 3:
             x = x.permute(0, 3, 1, 2)
             
-        features = self.backbone(x)
-        seg_logits = self.seg_head(features)
-
-        # Upsample segmentation logits to the same spatial size as the input image (or mask)
+        # Extract features
+        features = self.backbone(x)  # (B, 512, H/32, W/32)
+        
+        seg_logits = None
+        det_preds = None
+        
+        # Segmentation branch        
+        seg_logits = self.seg_head(features)  # (B, num_classes, H/32, W/32)
         seg_logits = F.interpolate(seg_logits, size=x.shape[2:], mode='bilinear', align_corners=False)
-        # print(seg_logits.shape)
         
-        # Detection branch:
-        # pooled = self.avgpool(features)  # shape: (B, 512, 1, 1)
-        # pooled = pooled.view(pooled.size(0), -1)  # shape: (B, 512)
-        # det_preds = self.detector(pooled)  # shape: (B, num_anchors*5)
-        # det_preds = det_preds.view(-1, self.num_anchors, 5)  # shape: (B, num_anchors, 5)
+        # Detection branch
+        if self.mode != "segmentation":
+
+            selected_logits = seg_logits[:, self.selected_det_indices, :, :]
+            det_probs = F.softmax(selected_logits, dim=1)  # (B, 5, H, W)
+            proposals_batch = generate_proposals(seg_logits,
+                                                    seg_threshold=self.seg_threshold,
+                                                    min_area=self.min_area)
+            det_preds = self.det_head(features, proposals_batch)
         
-        return seg_logits#, det_preds
+        return seg_logits, det_preds
     
-    def print_head(self, mode="segmentation"):
+    def print_head(self):
         """
-        Print the model info for classifier head
+        Print the head information of the model
         """
-        if (mode == "segmentation"):
+        if self.mode == "segmentation":
             print(self.seg_head)
-        elif (mode == "bbox"):
+        elif self.mode == "bbox":
             print(self.det_head)
-        elif (mode == "combined"):
+        elif self.mode == "combined":
+            print("-- Detection Head --")
             print(self.det_head)
+            print("-- Segmentation Head --")
             print(self.seg_head)
 
-    def postprocess_detections(self, det_preds):
+    def select_mode(self, mode):
         """
-        Post-process detection predictions by applying the confidence threshold.
-        
-        Args:
-            det_preds (torch.Tensor): Detection predictions of shape (B, num_anchors, 5).
-                                      The last dimension is [xmax, xmin, ymax, ymin, confidence].
-                                      
-        Returns:
-            output_boxes (list of torch.Tensor): List with length B, each tensor containing the selected
-                                                   boxes for that image (each box is a 5-element tensor).
+        Switch mode from "segmentation" & "bbox" & "combined"
         """
-        output_boxes = []
-        # Iterate over each sample in the batch.
-        for preds in det_preds:
-            # Confidence scores are the last element in each prediction.
-            conf = preds[:, -1]
-            # Select boxes with confidence above threshold.
-            keep = conf > self.confidence_threshold
-            output_boxes.append(preds[keep])
-        return output_boxes
+        self.mode = mode
 
 class SegNetEncoder(nn.Module):
     def __init__(self):
         super(SegNetEncoder, self).__init__()
-        # Change input channels from 3 to 512
-        self.enc1 = nn.Sequential(
+        self.enc = nn.Sequential(
             # nn.Conv2d(2048, 1024, kernel_size=3, padding=1),
             # nn.BatchNorm2d(1024),
             # nn.ReLU(inplace=True),
@@ -118,25 +110,14 @@ class SegNetEncoder(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True)
         )
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
-        
-        # # Second encoder block
-        # self.enc2 = nn.Sequential(
-        #     nn.Conv2d(64, 128, kernel_size=3, padding=1),
-        #     nn.BatchNorm2d(128),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv2d(128, 128, kernel_size=3, padding=1),
-        #     nn.BatchNorm2d(128),
-        #     nn.ReLU(inplace=True)
-        # )
-        # self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
     
     def forward(self, x):
         # x: (B, 3, H, W)
-        x1 = self.enc1(x)                     # (B, 64, H, W)
-        x1p, indices1 = self.pool1(x1)          # (B, 64, H/2, W/2)
+        x = self.enc(x)                     # (B, 64, H, W)
+        xp, indices = self.pool(x)          # (B, 64, H/2, W/2)
         
-        return x1p, (indices1, None), (x1.size(), None)
+        return xp, indices, x.size()
 
 class SegNetDecoder(nn.Module):
     """
@@ -145,17 +126,9 @@ class SegNetDecoder(nn.Module):
     """
     def __init__(self, num_classes):
         super(SegNetDecoder, self).__init__()
-        # First decoder block (corresponding to encoder block 2)
-        # self.unpool2 = nn.MaxUnpool2d(kernel_size=2, stride=2)
-        # self.dec2 = nn.Sequential(
-        #     nn.Conv2d(64, 128, kernel_size=3, padding=1),
-        #     nn.BatchNorm2d(128),
-        #     nn.ReLU(inplace=True)
-        # )
-        
-        # Second decoder block (corresponding to encoder block 1)
-        self.unpool1 = nn.MaxUnpool2d(kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(
+
+        self.unpool = nn.MaxUnpool2d(kernel_size=2, stride=2)
+        self.dec = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
@@ -167,11 +140,8 @@ class SegNetDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # Final 1x1 classifier to map to pixel-wise class scores
+        # Final classifier to map to pixel-wise class scores
         self.classifier = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
             nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -184,19 +154,10 @@ class SegNetDecoder(nn.Module):
             x: Bottleneck feature map from encoder (B, 128, H/4, W/4)
             indices: Tuple (indices1, indices2) from encoder
             sizes: Tuple (size1, size2) of encoder feature maps
-        """
-        indices1, indices2 = indices
-        size1, size2 = sizes
+        """         
+        x = self.unpool(x, indices, output_size=size)  
+        x = self.dec(x)                                  
         
-        # Decoder block corresponding to encoder block 2
-        # x = self.unpool2(x, indices2, output_size=size2)  
-        # x = self.dec2(x)                                 
-        
-        # Decoder block corresponding to encoder block 1
-        x = self.unpool1(x, indices1, output_size=size1)  
-        x = self.dec1(x)                                  
-        
-        # Classifier: output logits (B, num_classes, H, W)
         out = self.classifier(x)
         return out
 
@@ -217,3 +178,53 @@ class SegNet(nn.Module):
         # Decoder forward
         logits = self.decoder(encoded, indices, sizes)
         return logits
+
+class RCNN(nn.Module):
+    def __init__(self, in_channels, pooled_size=(7,7), scale_factor=1/32):
+        """
+        Args:
+            in_channels (int): Number of channels in the detection feature map.
+            pooled_size (tuple): Output size for ROI pooling.
+            scale_factor (float): Factor to scale proposals from input image coordinates to feature map coordinates.
+                                  For example, if feature_map = input/32, then scale_factor = 1/32.
+        """
+        super(SimpleRCNN, self).__init__()
+        self.pooled_size = pooled_size
+        self.scale_factor = scale_factor
+        self.fc1 = nn.Linear(in_channels * pooled_size[0] * pooled_size[1], 1024)
+        self.fc2 = nn.Linear(1024, 5)  # 4 offsets and 1 confidence offset
+    
+    def forward(self, features, proposals):
+        """
+        Args:
+            features (torch.Tensor): Detection feature map of shape (B, C, H_feat, W_feat).
+            proposals (list[torch.Tensor]): A list (length B) where each element is a tensor of shape (N, 5)
+                                            containing proposals in the original image coordinate space.
+        Returns:
+            refined_batch (list[torch.Tensor]): A list (length B) where each tensor is of shape (N, 5)
+                                                with refined bounding boxes and confidence.
+        """
+        refined_batch = []
+        B = features.size(0)
+        for i in range(B):
+            props = proposals[i]  # shape: (N, 5)
+            if props.numel() == 0:
+                refined_batch.append(props)
+                continue
+            # Scale proposals to feature map coordinates.
+            props_scaled = props.clone()
+            props_scaled[:, :4] = props_scaled[:, :4] * self.scale_factor
+            
+            # ROI pooling: extract a fixed-size feature for each proposal.
+            rois = roi_pooling(features[i], props_scaled[:, :4], self.pooled_size)
+            rois_flat = rois.view(rois.size(0), -1)
+            fc1_out = F.relu(self.fc1(rois_flat))
+            fc2_out = self.fc2(fc1_out)  # (N, 5): predicted offsets and confidence adjustment
+            
+            # Refine bounding boxes: add the predicted offsets to the original proposal.
+            refined_boxes = props[:, :4] + fc2_out[:, :4]
+            # Refine confidence: add the offset to the original confidence and squash with sigmoid.
+            refined_conf = torch.sigmoid(props[:, 4:5] + fc2_out[:, 4:5])
+            refined = torch.cat([refined_boxes, refined_conf], dim=1)
+            refined_batch.append(refined)
+        return refined_batch

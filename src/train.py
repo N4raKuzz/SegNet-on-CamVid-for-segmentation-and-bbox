@@ -25,7 +25,7 @@ def collate_fn_bbox(batch):
     images = torch.stack(images, dim=0)
     return images, list(targets)
 
-def train(model, optimizer, dice_loss_fn, focal_loss_fn, iou_loss_fn, device, seg_dataloader, bbox_dataloader):
+def train(model, optimizer, focal_loss_fn, iou_loss_fn, device, seg_dataloader, bbox_dataloader):
     model.train()
     running_loss_seg = 0.0
     running_loss_det = 0.0
@@ -38,34 +38,15 @@ def train(model, optimizer, dice_loss_fn, focal_loss_fn, iou_loss_fn, device, se
         # --- Segmentation branch ---
         images_seg = images_seg.to(device)
         masks = masks.to(device)  # shape: (B, H, W)
-        # print(f"masks target {masks.shape}")
         seg_logits = model(images_seg)
-        # print(f"seg logits {seg_logits.shape}")
         num_seg_classes = seg_logits.size(1)
-        # Convert masks to one-hot encoding: (B, H, W) -> (B, C, H, W)
-        masks_one_hot = F.one_hot(masks.long(), num_classes=32).permute(0, 3, 1, 2).float()
-        loss_dice = dice_loss_fn(seg_logits, masks_one_hot)
-        loss_focal = focal_loss_fn(seg_logits, masks_one_hot)
-        loss_seg = loss_focal + loss_dice
+        masks_one_hot = F.one_hot(masks.long(), num_classes=32).permute(0, 3, 1, 2).float() # To one-hot (B, H, W) -> (B, C, H, W)
+        loss_seg = focal_loss_fn(seg_logits, masks_one_hot)
 
-        # # --- Detection branch ---
-        # images_bbox = images_bbox.to(device)
-        # # Get detection predictions: shape (B, num_anchors, 5)
-        # _, det_preds_bbox = model(images_bbox)
-        # batch_size = images_bbox.size(0)
-        # loss_det_list = []
-        # for i in range(batch_size):
-        #     pred_boxes = det_preds_bbox[i, :, :4]
-        #     pred_boxes_conv = torch.stack([pred_boxes[:, 1], pred_boxes[:, 3],
-        #                                    pred_boxes[:, 0], pred_boxes[:, 2]], dim=1)
-        #     gt_boxes = targets_bbox[i]['bboxes'].to(device)
-        #     _, loss_img = iou_loss_fn(pred_boxes_conv, gt_boxes)
-        #     loss_det_list.append(loss_img)
-        # # Average the detection loss over the batch
-        # loss_det = torch.stack(loss_det_list).mean()
+        # --- Detection branch ---
 
-        # total_loss = loss_seg + loss_det
-        # total_loss.backward()
+        total_loss = loss_seg + loss_det
+        total_loss.backward()
 
         loss_seg.backward()
         optimizer.step()

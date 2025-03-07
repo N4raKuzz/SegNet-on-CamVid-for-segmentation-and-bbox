@@ -4,9 +4,8 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from model import ResNetSegDetModel
-from utils import compute_iou, evaluate_segmentation, evaluate_detection
+from utils import compute_iou, evaluate_segmentation, evaluate_detection, visualize_predictions
 from dataloader import CamVidDataset
-from visualize import visualize_predictions
 
 TARGET_CLASS_ID = {
     1: "Bicyclist",
