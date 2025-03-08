@@ -72,7 +72,7 @@ class CamVidDataset(Dataset):
 
         :param root_dir: Root directory for the CamVid dataset.
         :param split: One of 'train', 'val', or 'test'.
-        :param mode: 'segmentation' or 'bbox'.
+        :param mode: 'segmentation' or 'det'.
         :param transform: Transformations to be applied to the image.
         :param class_mapping: Dictionary mapping RGB tuples to integer class IDs.
                               If not provided, defaults to TEST_CLASS_COLORS.
@@ -96,7 +96,7 @@ class CamVidDataset(Dataset):
         ])
         
         # Load bbox annotations if needed
-        if self.mode == 'bbox':
+        if self.mode == 'det':
             with open(self.annotation_file, 'r') as f:
                 annotation_list = json.load(f)
                 self.annotations = {entry['filename']: entry for entry in annotation_list}
@@ -122,7 +122,7 @@ class CamVidDataset(Dataset):
 
             return image, mask
 
-        elif self.mode == 'bbox':
+        elif self.mode == 'det':
             annotation = self.annotations.get(filename, None)
             bboxes = []
             labels = []

@@ -18,6 +18,7 @@ INPUT_WIDTH = 960
 # (192,128,192) in RGB remains (192,128,192) in BGR -> Truck_Bus
 RARE_COLORS_BGR = [
     (192, 0, 192),   # MotorcycleScooter
+    (192, 128, 192)    # Truck_Bus
 ]
 
 def find_rare_class():
@@ -55,49 +56,17 @@ def augment_rotate(image, mask):
     rotated_mask = cv2.rotate(mask, cv2.ROTATE_180)
     return rotated_img, rotated_mask
 
-def augment_zoom(image, mask):
+def augment_flip(image, mask, flipcode=1):
     """
-    Zoom in to an area where rare class pixels exist. The function:
-      1. Finds the bounding box of the rare pixels in the mask.
-      2. Optionally, expands the bounding box by a margin.
-      3. Crops the image and mask accordingly.
-      4. Resizes the crop back to the full input size (720x960).
+    Rotate both image and mask 180 degrees.
     """
-    # Find coordinates where the mask has any rare color
-    rare_pixels = np.zeros(mask.shape[:2], dtype=bool)
-    for color in RARE_COLORS_BGR:
-        match = np.all(mask == np.array(color, dtype=np.uint8), axis=-1)
-        rare_pixels = rare_pixels | match
 
-    coords = np.column_stack(np.where(rare_pixels))
-    if coords.size == 0:
-        # If no rare pixels found, return original resized.
-        resized_img = cv2.resize(image, (INPUT_WIDTH, INPUT_HEIGHT))
-        resized_mask = cv2.resize(mask, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_NEAREST)
-        return resized_img, resized_mask
+    flipped_img = cv2.flip(image, flipcode)
+    flipped_mask = cv2.flip(mask, flipcode)
 
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
+    return flipped_img, flipped_mask
 
-    # Expand the bounding box by a margin (say, 20% of the bbox size)
-    margin_y = int(0.2 * (y_max - y_min))
-    margin_x = int(0.2 * (x_max - x_min))
-
-    y1 = max(0, y_min - margin_y)
-    y2 = min(image.shape[0], y_max + margin_y)
-    x1 = max(0, x_min - margin_x)
-    x2 = min(image.shape[1], x_max + margin_x)
-
-    # Crop the region from both image and mask
-    cropped_img = image[y1:y2, x1:x2]
-    cropped_mask = mask[y1:y2, x1:x2]
-
-    # Resize back to original input size
-    zoomed_img = cv2.resize(cropped_img, (INPUT_WIDTH, INPUT_HEIGHT))
-    zoomed_mask = cv2.resize(cropped_mask, (INPUT_WIDTH, INPUT_HEIGHT), interpolation=cv2.INTER_NEAREST)
-    return zoomed_img, zoomed_mask
-
-def augment_hsv(image, mask):
+def augment_hsv(image, mask, hue_shift, sat_mult, val_mult):
     """
     Adjust the HSV values of the image.
     The mask remains unchanged.
@@ -105,9 +74,9 @@ def augment_hsv(image, mask):
     """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
     # Adjustments: these parameters can be tuned.
-    hue_shift = -10.0        # shift hue by 10 degrees (0-180 in OpenCV)
-    sat_mult = 0.8          # increase saturation by 10%
-    val_mult = 1.2          # increase brightness by 10%
+    # hue_shift = -10.0        # shift hue by 10 degrees (0-180 in OpenCV)
+    # sat_mult = 0.8          # increase saturation by 10%
+    # val_mult = 1.2          # increase brightness by 10%
 
     hsv[..., 0] = (hsv[..., 0] + hue_shift) % 180
     hsv[..., 1] = np.clip(hsv[..., 1] * sat_mult, 0, 255)
@@ -149,13 +118,25 @@ def augmentation_pipeline():
             print(f"Error reading {sample}. Skipping.")
             continue
         
-        # # 1. Rotation augmentation
-        # rotated_img, rotated_mask = augment_rotate(image, mask)
-        # save_augmented(rotated_img, rotated_mask, sample, "rotate")
+        # 1. Rotation augmentation
+        rotated_img, rotated_mask = augment_flip(image, mask, -1)
+        save_augmented(rotated_img, rotated_mask, sample, "rotate")
+
+        # 2. Flip augmentation
+        flipv_image, flipv_mask = augment_flip(image, mask, 1)
+        save_augmented(flipv_image, flipv_mask, sample, 'flipv')
+        fliph_image, fliph_mask = augment_flip(image, mask, 0)
+        save_augmented(fliph_image, fliph_mask, sample, 'fliph')
         
-        # 2. HSV adjustment augmentation
-        hsv_img, hsv_mask = augment_hsv(image, mask)
-        save_augmented(hsv_img, hsv_mask, sample, "hsv2")
+        # 3. HSV adjustment augmentation
+        hsv1_img, hsv1_mask = augment_hsv(image, mask, hue_shift=10, sat_mult=1.2, val_mult=1.2)
+        save_augmented(hsv1_img, hsv1_mask, sample, "hsv1")
+        hsv2_img, hsv2_mask = augment_hsv(image, mask, hue_shift=-10, sat_mult=1.2, val_mult=1.2)
+        save_augmented(hsv2_img, hsv2_mask, sample, "hsv2")
+        hsv3_img, hsv3_mask = augment_hsv(image, mask, hue_shift=10, sat_mult=0.9, val_mult=0.9)
+        save_augmented(hsv3_img, hsv3_mask, sample, "hsv3")
+        hsv4_img, hsv4_mask = augment_hsv(image, mask, hue_shift=-10, sat_mult=0.9, val_mult=0.9)
+        save_augmented(hsv3_img, hsv3_mask, sample, "hsv4")
 
 if __name__ == "__main__":
     augmentation_pipeline()

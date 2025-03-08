@@ -50,31 +50,19 @@ def get_bounding_boxes_for_class(binary_mask, class_id):
     Given a binary mask (mask == 255 => that pixel belongs to the class),
     find connected components and return bounding boxes for each component.
     """
-    # Connected-component labeling with stats
-    num_labels, labels_im, stats, centroids = cv2.connectedComponentsWithStats(
-        binary_mask, connectivity=8
-    )
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     bboxes = []
-    # Label 0 is background; skip it
-    for label_idx in range(1, num_labels):
-        left   = stats[label_idx, cv2.CC_STAT_LEFT]
-        top    = stats[label_idx, cv2.CC_STAT_TOP]
-        width  = stats[label_idx, cv2.CC_STAT_WIDTH]
-        height = stats[label_idx, cv2.CC_STAT_HEIGHT]
-
-        x_min = left
-        x_max = left + width - 1
-        y_min = top
-        y_max = top + height - 1
-
-        bboxes.append({
-            "class_id": int(class_id),  # store class_id, not name
-            "x_min": int(x_min),
-            "x_max": int(x_max),
-            "y_min": int(y_min),
-            "y_max": int(y_max)
-        })
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w > 2 and h > 2:  # Ignore small noise
+            bboxes.append({
+                "class_id": int(class_id),
+                "x_min": int(x - w/2),
+                "y_min": int(y - h/2),
+                "x_max": int(x + w/2),
+                "y_max": int(y + h/2)
+            })
 
     return bboxes
 
@@ -93,8 +81,6 @@ def generate_annotations(images_dir, masks_dir, output_json):
                     of the form:
                     {
                       "filename": str,
-                      "width": int,
-                      "height": int,
                       "bboxes": [
                          {
                            "class_id": int,
@@ -135,8 +121,6 @@ def generate_annotations(images_dir, masks_dir, output_json):
             print(f"[WARNING] Could not read image or mask for '{filename}'. Skipping.")
             continue
         
-        height, width = image.shape[:2]
-        
         # Collect bounding boxes for all classes we care about
         image_bboxes = []
         
@@ -150,8 +134,6 @@ def generate_annotations(images_dir, masks_dir, output_json):
         
         annotation_data = {
             "filename": filename,
-            "width": width,
-            "height": height,
             "bboxes": image_bboxes
         }
         
@@ -210,8 +192,14 @@ def evaluate_segmentation(model, dataloader, device):
             # If masks are one-hot encoded, convert to class indices.
             if masks.dim() == 4:
                 masks = masks.argmax(dim=1)  # shape: (B, H, W)
-                
-            seg_logits = model(images)  # shape: (B, 32, H, W)
+            
+            # Get model outputs. If the model returns a tuple, take the first element.
+            outputs = model(images)
+            if isinstance(outputs, tuple):
+                seg_logits = outputs[0]
+            else:
+                seg_logits = outputs  # shape: (B, 32, H, W)
+            
             preds = seg_logits.argmax(dim=1)  # shape: (B, H, W), values in [0, 31]
             
             # Map the 32-class predictions to the 5 desired classes.
@@ -258,64 +246,117 @@ def compute_average_precision(pred_scores, pred_matches, num_gt):
 
 def evaluate_detection(model, dataloader, device, iou_threshold=0.5):
     """
-    Evaluate detection performance using a simplified mAP calculation.
-    (Note: a full mAP implementation is more involved; this is a basic approximation.)
+    Evaluate detection performance using a simplified mAP calculation, and also compute 
+    segmentation IoU if segmentation ground truth is available.
     
     Assumes:
       - The model detection head outputs boxes in format [xmax, xmin, ymax, ymin, confidence].
-      - The dataset in bbox mode returns ground truth boxes in [x_min, y_min, x_max, y_max].
+      - For detection, the dataset returns ground truth boxes in [x_min, y_min, x_max, y_max].
+      - Optionally, the target dict may include a segmentation mask under key 'mask' 
+        (with shape (H, W), class indices in [0, 31]).
+    
+    Returns:
+        ap (float): Average precision computed for detection.
+        mean_seg_iou (float): Mean segmentation IoU over evaluation classes.
+        iou_per_class (np.array): IoU for each evaluation class.
     """
     model.eval()
     pred_scores_all = []
     pred_matches_all = []
     total_gt = 0
 
+    # For segmentation evaluation, accumulate intersections and unions per evaluation class.
+    # (Assumes TRAIN_TO_EVAL_MAPPING is defined, mapping from 32-class predictions to 5 eval classes.)
+    eval_class_ids = sorted(set(TRAIN_TO_EVAL_MAPPING.values()))
+    total_intersections_seg = {cls: 0 for cls in eval_class_ids}
+    total_unions_seg = {cls: 0 for cls in eval_class_ids}
+    
     with torch.no_grad():
         for images, target in dataloader:
             images = images.to(device)
-            # target is a dict with keys 'bboxes' and 'labels'
-            bboxes_gt = target['bboxes']  # list or tensor of shape (B, num_boxes, 4)
-            # Forward pass: we only use the detection branch here.
-            _, det_preds = model(images)
+            
+            # Forward pass: get both segmentation and detection outputs.
+            seg_logits, det_preds = model(images)
+            
+            # -------------------------
+            # Detection evaluation
+            # -------------------------
+            # Expect target to be a dict with key 'bboxes' (and optionally 'mask').
+            if isinstance(target, dict) and 'bboxes' in target:
+                bboxes_gt = target['bboxes']  # list or tensor, one per image
+            else:
+                bboxes_gt = None
+
             batch_size = images.size(0)
             for i in range(batch_size):
-                # For each image:
-                preds = det_preds[i]  # shape (num_anchors, 5)
-                # Filter predictions by confidence threshold.
-                confidence_threshold = model.confidence_threshold
-                keep = preds[:, -1] > confidence_threshold
-                preds = preds[keep]
-                if preds.numel() == 0:
-                    pred_boxes = np.empty((0, 4))
-                    pred_confidences = np.empty((0,))
-                else:
-                    # Convert boxes from [xmax, xmin, ymax, ymin] to [x_min, y_min, x_max, y_max]
-                    pred_boxes = torch.stack([preds[:,1], preds[:,3], preds[:,0], preds[:,2]], dim=1).cpu().numpy()
-                    pred_confidences = preds[:, -1].cpu().numpy()
-                # Ground truth boxes for image i (assumed already in [x_min, y_min, x_max, y_max])
-                gt_boxes = bboxes_gt[i].cpu().numpy() if bboxes_gt[i].numel() > 0 else np.empty((0,4))
-                total_gt += len(gt_boxes)
-                # For each prediction, determine if it is a true positive.
-                image_pred_matches = np.zeros(len(pred_boxes))
-                gt_matched = np.zeros(len(gt_boxes))
-                for j, pred_box in enumerate(pred_boxes):
-                    best_iou = 0
-                    best_idx = -1
-                    for k, gt_box in enumerate(gt_boxes):
-                        iou = compute_iou(pred_box, gt_box)
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_idx = k
-                    if best_iou >= iou_threshold and best_idx != -1 and gt_matched[best_idx] == 0:
-                        image_pred_matches[j] = 1  # true positive
-                        gt_matched[best_idx] = 1
+                if bboxes_gt is not None:
+                    preds = det_preds[i]  # shape (num_boxes, 5)
+                    # Use the model's confidence threshold
+                    confidence_threshold = model.confidence_threshold if hasattr(model, 'confidence_threshold') else 0.5
+                    keep = preds[:, -1] > confidence_threshold
+                    preds = preds[keep]
+                    if preds.numel() == 0:
+                        pred_boxes = np.empty((0, 4))
+                        pred_confidences = np.empty((0,))
                     else:
-                        image_pred_matches[j] = 0  # false positive
-                pred_scores_all.extend(pred_confidences.tolist())
-                pred_matches_all.extend(image_pred_matches.tolist())
+                        # Convert from [xmax, xmin, ymax, ymin] to [x_min, y_min, x_max, y_max]
+                        pred_boxes = torch.stack([preds[:, 1], preds[:, 3], preds[:, 0], preds[:, 2]], dim=1).cpu().numpy()
+                        pred_confidences = preds[:, -1].cpu().numpy()
+                    
+                    gt_boxes = bboxes_gt[i].cpu().numpy() if bboxes_gt[i].numel() > 0 else np.empty((0, 4))
+                    total_gt += len(gt_boxes)
+                    
+                    image_pred_matches = np.zeros(len(pred_boxes))
+                    gt_matched = np.zeros(len(gt_boxes))
+                    for j, pred_box in enumerate(pred_boxes):
+                        best_iou = 0
+                        best_idx = -1
+                        for k, gt_box in enumerate(gt_boxes):
+                            iou = compute_iou(pred_box, gt_box)
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_idx = k
+                        if best_iou >= iou_threshold and best_idx != -1 and gt_matched[best_idx] == 0:
+                            image_pred_matches[j] = 1  # true positive
+                            gt_matched[best_idx] = 1
+                        else:
+                            image_pred_matches[j] = 0  # false positive
+                    pred_scores_all.extend(pred_confidences.tolist())
+                    pred_matches_all.extend(image_pred_matches.tolist())
+                    
+                # -------------------------
+                # Segmentation evaluation
+                # -------------------------
+                # If the target dict contains a segmentation mask under key 'mask'
+                if isinstance(target, dict) and 'mask' in target:
+                    # Assume segmentation ground truth mask is of shape (H, W) with class indices.
+                    seg_gt = target['mask'][i].to(device)
+                    # Get predicted segmentation from seg_logits (assumed shape: (B, 32, H, W))
+                    pred_seg = seg_logits[i].argmax(dim=0)  # shape: (H, W)
+                    
+                    # Map 32-class predictions to evaluation classes.
+                    mapped_preds = torch.zeros_like(pred_seg)
+                    for train_cls, eval_cls in TRAIN_TO_EVAL_MAPPING.items():
+                        mapped_preds[pred_seg == train_cls] = eval_cls
+                    # Compute per-class intersection and union.
+                    for cls in eval_class_ids:
+                        intersection = ((mapped_preds == cls) & (seg_gt == cls)).sum().item()
+                        union = ((mapped_preds == cls) | (seg_gt == cls)).sum().item()
+                        total_intersections_seg[cls] += intersection
+                        total_unions_seg[cls] += union
 
-    ap = compute_average_precision(pred_scores_all, pred_matches_all, total_gt)
-    return ap
+    # Compute Average Precision for detection.
+    ap = compute_average_precision(pred_scores_all, pred_matches_all, total_gt) if total_gt > 0 else 0.0
+
+    # Compute segmentation IoU per evaluation class and mean IoU.
+    iou_per_class = np.array([
+        total_intersections_seg[cls] / (total_unions_seg[cls] + 1e-6)
+        for cls in eval_class_ids
+    ])
+    mean_seg_iou = iou_per_class.mean()
+    
+    return ap, mean_seg_iou, iou_per_class
+
 
 def find_rare_classes_by_average(annotations_json):
     """

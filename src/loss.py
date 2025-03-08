@@ -129,53 +129,53 @@ class EdgeAwareLoss(nn.Module):
         edge_map = grad_magnitude.mean(dim=1, keepdim=True)  # shape: (B, 1, H, W)
         return edge_map
 
+class IouLoss(nn.Module):
+    def __init__(self):
+        super(IouLoss, self).__init__()
 
-class WeightedIoULoss(nn.Module):
-    """
-    Weighted IoU Loss for bounding box regression.
-    The loss expects predicted and target boxes in the format:
-    [xmax, xmin, ymax, ymin] for each box.
-    """
-    def __init__(self, weight=1.0, eps=1e-6):
-        super(WeightedIoULoss, self).__init__()
-        if isinstance(weight, list):
-            self.weight = torch.tensor(weight, dtype=torch.float32)
-        else:
-            self.weight = weight
-        self.eps = eps
+    def forward(self, proposals, gt_boxes):
+        """
+        Calculate an IoU-based loss for a group of proposals against ground-truth boxes.
+        For each proposal, the maximum IoU (ignoring class labels) against all gt boxes is computed.
+        The loss is defined as the average of (1 - max_iou) over all proposals.
 
-    def forward(self, pred_boxes, target_boxes):
-        # Unpack box coordinates.
-        pred_xmax, pred_xmin, pred_ymax, pred_ymin = pred_boxes.unbind(-1)
-        target_xmax, target_xmin, target_ymax, target_ymin = target_boxes.unbind(-1)
+        Args:
+            proposals (torch.Tensor): Tensor of shape (N, 4) containing proposal boxes in [xmin, ymin, xmax, ymax] format.
+            gt_boxes (torch.Tensor): Tensor of shape (M, 4) containing ground-truth boxes.
+
+        Returns:
+            torch.Tensor: A scalar tensor representing the IoU loss.
+        """
+        if proposals.numel() == 0 or gt_boxes.numel() == 0:
+            return torch.tensor(0.0, device=proposals.device)
         
-        # Reorder coordinates to standard (xmin, ymin, xmax, ymax).
-        inter_xmin = torch.max(pred_xmin, target_xmin)
-        inter_ymin = torch.max(pred_ymin, target_ymin)
-        inter_xmax = torch.min(pred_xmax, target_xmax)
-        inter_ymax = torch.min(pred_ymax, target_ymax)
+        N = proposals.size(0)
+        M = gt_boxes.size(0)
         
-        # Compute intersection area.
+        # Expand dimensions to compute pairwise intersections.
+        proposals_exp = proposals.unsqueeze(1).expand(N, M, 4)  # (N, M, 4)
+        gt_boxes_exp = gt_boxes.unsqueeze(0).expand(N, M, 4)      # (N, M, 4)
+        
+        # Compute intersection coordinates.
+        inter_xmin = torch.max(proposals_exp[:, :, 0], gt_boxes_exp[:, :, 0])
+        inter_ymin = torch.max(proposals_exp[:, :, 1], gt_boxes_exp[:, :, 1])
+        inter_xmax = torch.min(proposals_exp[:, :, 2], gt_boxes_exp[:, :, 2])
+        inter_ymax = torch.min(proposals_exp[:, :, 3], gt_boxes_exp[:, :, 3])
+        
         inter_w = (inter_xmax - inter_xmin).clamp(min=0)
         inter_h = (inter_ymax - inter_ymin).clamp(min=0)
         inter_area = inter_w * inter_h
         
-        # Compute areas of predicted and target boxes.
-        pred_area = (pred_xmax - pred_xmin).clamp(min=0) * (pred_ymax - pred_ymin).clamp(min=0)
-        target_area = (target_xmax - target_xmin).clamp(min=0) * (target_ymax - target_ymin).clamp(min=0)
+        # Compute areas of proposals and ground-truth boxes.
+        area_proposals = (proposals_exp[:, :, 2] - proposals_exp[:, :, 0]) * (proposals_exp[:, :, 3] - proposals_exp[:, :, 1])
+        area_gt = (gt_boxes_exp[:, :, 2] - gt_boxes_exp[:, :, 0]) * (gt_boxes_exp[:, :, 3] - gt_boxes_exp[:, :, 1])
         
-        # Compute union area.
-        union_area = pred_area + target_area - inter_area + self.eps
+        union_area = area_proposals + area_gt - inter_area + 1e-6  # avoid division by zero
         
-        # Compute IoU.
-        iou = inter_area / union_area
-        loss = (1 - iou)
+        iou = inter_area / union_area  # shape: (N, M)
+        # For each proposal, take the maximum IoU among all gt boxes.
+        max_iou, _ = iou.max(dim=1)  # shape: (N,)
         
-        # Apply weight (supports both scalar and tensor weights)
-        if isinstance(self.weight, torch.Tensor):
-            # Ensure weight is broadcastable to loss.
-            loss = self.weight * loss
-        else:
-            loss = self.weight * loss
-
-        return loss, loss.mean()
+        loss = (1 - max_iou).mean()
+        
+        return loss

@@ -13,7 +13,7 @@ class ResNetSegDetModel(nn.Module):
         """
         Args:
             num_classes (int): Number of segmentation classes.
-            mode (str): 'segmentation', 'bbox', or 'combined'.
+            mode (str): 'segmentation', 'det', or 'combined'.
             seg_threshold (float): Threshold for generating proposals from seg logits.
             min_area (int): Minimum connected component area to generate a proposal.
         """
@@ -63,6 +63,7 @@ class ResNetSegDetModel(nn.Module):
             proposals_batch = generate_proposals(seg_logits,
                                                     seg_threshold=self.seg_threshold,
                                                     min_area=self.min_area)
+            print(proposals_batch)
             det_preds = self.det_head(features, proposals_batch)
         
         return seg_logits, det_preds
@@ -73,7 +74,7 @@ class ResNetSegDetModel(nn.Module):
         """
         if self.mode == "segmentation":
             print(self.seg_head)
-        elif self.mode == "bbox":
+        elif self.mode == "det":
             print(self.det_head)
         elif self.mode == "combined":
             print("-- Detection Head --")
@@ -83,7 +84,7 @@ class ResNetSegDetModel(nn.Module):
 
     def select_mode(self, mode):
         """
-        Switch mode from "segmentation" & "bbox" & "combined"
+        Switch mode from "segmentation" & "det" & "combined"
         """
         self.mode = mode
 
@@ -155,7 +156,7 @@ class SegNetDecoder(nn.Module):
             indices: Tuple (indices1, indices2) from encoder
             sizes: Tuple (size1, size2) of encoder feature maps
         """         
-        x = self.unpool(x, indices, output_size=size)  
+        x = self.unpool(x, indices, output_size=sizes)  
         x = self.dec(x)                                  
         
         out = self.classifier(x)
@@ -188,11 +189,11 @@ class RCNN(nn.Module):
             scale_factor (float): Factor to scale proposals from input image coordinates to feature map coordinates.
                                   For example, if feature_map = input/32, then scale_factor = 1/32.
         """
-        super(SimpleRCNN, self).__init__()
+        super(RCNN, self).__init__()
         self.pooled_size = pooled_size
         self.scale_factor = scale_factor
-        self.fc1 = nn.Linear(in_channels * pooled_size[0] * pooled_size[1], 1024)
-        self.fc2 = nn.Linear(1024, 5)  # 4 offsets and 1 confidence offset
+        self.fc1 = nn.Linear(in_channels * pooled_size[0] * pooled_size[1], 256)
+        self.fc2 = nn.Linear(256, 5)  # 4 offsets and 1 confidence offset
     
     def forward(self, features, proposals):
         """
