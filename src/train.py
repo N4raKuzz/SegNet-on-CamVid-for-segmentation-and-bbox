@@ -88,12 +88,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # --- Hyperparameters ---
     num_seg_classes = 32  # For segmentation training.
-    total_epochs = 20     # Total number of epochs.
-    seg_only_epochs = 10  # First 30 epochs: segmentation only.
+    total_epochs = 50     # Total number of epochs.
+    seg_only_epochs = 30  # First 30 epochs: segmentation only.
     lr_seg = 1e-4         # Learning rate for segmentation-only phase.
     lr_combined = 1e-5    # Learning rate for combined training phase.
     lambda_det = 1.0      # Balance factor for detection loss during combined training.
-    batch_size = 6
+    batch_size = 4
 
     # --- Initialize model ---
     print("Initializing model...")

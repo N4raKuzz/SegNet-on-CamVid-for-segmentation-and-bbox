@@ -63,7 +63,7 @@ class ResNetSegDetModel(nn.Module):
             proposals_batch = generate_proposals(seg_logits,
                                                     seg_threshold=self.seg_threshold,
                                                     min_area=self.min_area)
-            print(proposals_batch)
+            # print(proposals_batch)
             det_preds = self.det_head(features, proposals_batch)
         
         return seg_logits, det_preds
